@@ -1,50 +1,41 @@
-//go:build !js
+//go:build js
 
 package graphdb
 
 import (
 	"fmt"
 
-	bolt "go.etcd.io/bbolt"
+	"github.com/mstrYoda/goraphdb/wasm"
 )
 
-// IntegrityError describes a single data corruption issue found during verification.
 type IntegrityError struct {
-	Shard   int    // shard index
-	Bucket  string // bucket name ("nodes" or "edges")
-	Key     string // hex-encoded key
-	Message string // human-readable description
+	Shard   int
+	Bucket  string
+	Key     string
+	Message string
 }
 
 func (e IntegrityError) Error() string {
 	return fmt.Sprintf("shard %d, %s[%s]: %s", e.Shard, e.Bucket, e.Key, e.Message)
 }
 
-// IntegrityReport is the result of a VerifyIntegrity scan.
 type IntegrityReport struct {
 	NodesChecked int
 	EdgesChecked int
 	Errors       []IntegrityError
 }
 
-// OK returns true if no integrity errors were found.
 func (r *IntegrityReport) OK() bool {
 	return len(r.Errors) == 0
 }
 
-// VerifyIntegrity scans all node and edge data across all shards, verifying
-// CRC32 checksums and structural validity. Returns a report of any corruption found.
-// This is a read-only operation safe for concurrent use.
 func (db *DB) VerifyIntegrity() (*IntegrityReport, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
-
 	report := &IntegrityReport{}
-
 	for idx, s := range db.shards {
-		err := s.db.View(func(tx *bolt.Tx) error {
-			// Verify nodes.
+		err := s.db.View(func(tx *wasm.MemTx) error {
 			nodesBucket := tx.Bucket(bucketNodes)
 			if nodesBucket != nil {
 				err := nodesBucket.ForEach(func(k, v []byte) error {
@@ -58,14 +49,12 @@ func (db *DB) VerifyIntegrity() (*IntegrityReport, error) {
 							Message: err.Error(),
 						})
 					}
-					return nil // continue scanning even on error
+					return nil
 				})
 				if err != nil {
 					return err
 				}
 			}
-
-			// Verify edges.
 			edgesBucket := tx.Bucket(bucketEdges)
 			if edgesBucket != nil {
 				err := edgesBucket.ForEach(func(k, v []byte) error {
@@ -85,26 +74,16 @@ func (db *DB) VerifyIntegrity() (*IntegrityReport, error) {
 					return err
 				}
 			}
-
 			return nil
 		})
 		if err != nil {
 			return report, fmt.Errorf("graphdb: integrity check failed on shard %d: %w", idx, err)
 		}
 	}
-
 	if report.OK() {
-		db.log.Info("integrity check passed",
-			"nodes_checked", report.NodesChecked,
-			"edges_checked", report.EdgesChecked,
-		)
+		db.log.Info("integrity check passed", "nodes_checked", report.NodesChecked, "edges_checked", report.EdgesChecked)
 	} else {
-		db.log.Error("integrity check found errors",
-			"nodes_checked", report.NodesChecked,
-			"edges_checked", report.EdgesChecked,
-			"errors", len(report.Errors),
-		)
+		db.log.Error("integrity check found errors", "nodes_checked", report.NodesChecked, "edges_checked", report.EdgesChecked, "errors", len(report.Errors))
 	}
-
 	return report, nil
 }

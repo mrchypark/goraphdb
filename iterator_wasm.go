@@ -1,4 +1,4 @@
-//go:build !js
+//go:build js
 
 package graphdb
 
@@ -7,58 +7,24 @@ import (
 	"fmt"
 	"sort"
 
-	bolt "go.etcd.io/bbolt"
+	"github.com/mstrYoda/goraphdb/wasm"
 )
 
-// RowIterator is a lazy, pull-based iterator over Cypher query result rows.
-// Callers must call Close() when done to release underlying resources
-// (e.g., bbolt read transactions).
-//
-// Usage:
-//
-//	iter, err := db.CypherStream("MATCH (n) RETURN n.name LIMIT 10")
-//	if err != nil { ... }
-//	defer iter.Close()
-//	for iter.Next() {
-//	    row := iter.Row()
-//	    fmt.Println(row)
-//	}
-//	if err := iter.Err(); err != nil { ... }
 type RowIterator interface {
-	// Next advances the iterator to the next row. Returns false when
-	// there are no more rows or an error occurred.
 	Next() bool
-	// Row returns the current row. Only valid after Next() returns true.
 	Row() map[string]any
-	// Columns returns the column names in RETURN order.
 	Columns() []string
-	// Err returns the first error encountered during iteration.
 	Err() error
-	// Close releases all resources held by the iterator.
 	Close()
 }
 
-// ---------------------------------------------------------------------------
-// CypherStream — public API returning a lazy RowIterator.
-// ---------------------------------------------------------------------------
-
-// CypherStream parses and executes a Cypher query, returning a lazy iterator
-// over result rows. For queries without ORDER BY, rows are produced one at a
-// time without full materialization, giving O(1) memory and fast time-to-first-row.
-//
-// The caller MUST call Close() on the returned iterator.
 func (db *DB) CypherStream(ctx context.Context, query string) (RowIterator, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
-
 	return safeExecuteResult(func() (RowIterator, error) {
 		ctx, cancel := db.governor.wrapContext(ctx)
-		// NOTE: we do NOT defer cancel() here because the iterator may outlive
-		// this function. The cancel will fire when the context's timeout expires
-		// or the parent context is cancelled, which is the desired behavior.
 		_ = cancel
-
 		ast := db.cache.get(query)
 		if ast == nil {
 			parsed, err := parseCypher(query)
@@ -73,21 +39,17 @@ func (db *DB) CypherStream(ctx context.Context, query string) (RowIterator, erro
 			ast = parsed.read
 			db.cache.put(query, ast)
 		}
-
 		return db.buildIterator(ctx, ast)
 	})
 }
 
-// CypherStreamWithParams is the parameterized version of CypherStream.
 func (db *DB) CypherStreamWithParams(ctx context.Context, query string, params map[string]any) (RowIterator, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
-
 	return safeExecuteResult(func() (RowIterator, error) {
 		ctx, cancel := db.governor.wrapContext(ctx)
-		_ = cancel // see CypherStream comment about iterator lifetime
-
+		_ = cancel
 		ast := db.cache.get(query)
 		if ast == nil {
 			parsed, err := parseCypher(query)
@@ -102,7 +64,6 @@ func (db *DB) CypherStreamWithParams(ctx context.Context, query string, params m
 			ast = parsed.read
 			db.cache.put(query, ast)
 		}
-
 		resolved := *ast
 		if len(params) > 0 {
 			if err := resolveParams(&resolved, params); err != nil {
@@ -114,10 +75,7 @@ func (db *DB) CypherStreamWithParams(ctx context.Context, query string, params m
 	})
 }
 
-// buildIterator constructs a RowIterator for the given parsed query.
-// For EXPLAIN-only queries, returns nil (caller should use Cypher() instead).
 func (db *DB) buildIterator(ctx context.Context, q *CypherQuery) (RowIterator, error) {
-	// EXPLAIN/PROFILE queries don't stream — fall back to materialized.
 	if q.Explain != ExplainNone {
 		result, err := db.executeCypher(ctx, q)
 		if err != nil {
@@ -125,8 +83,6 @@ func (db *DB) buildIterator(ctx context.Context, q *CypherQuery) (RowIterator, e
 		}
 		return newSliceIterator(result.Columns, result.Rows), nil
 	}
-
-	// OPTIONAL MATCH — fall back to materialized (complex join logic).
 	if q.OptionalMatch != nil {
 		result, err := db.executeCypherNormal(ctx, q)
 		if err != nil {
@@ -134,61 +90,42 @@ func (db *DB) buildIterator(ctx context.Context, q *CypherQuery) (RowIterator, e
 		}
 		return newSliceIterator(result.Columns, result.Rows), nil
 	}
-
 	pat := q.Match.Pattern
-
 	switch {
 	case len(pat.Nodes) == 1 && len(pat.Rels) == 0:
 		return db.buildNodeMatchIterator(q)
-
 	case len(pat.Nodes) == 2 && len(pat.Rels) == 1:
-		// For pattern matches, fall back to materialized for now.
-		// The scan-level streaming is already the biggest win (node match).
 		result, err := db.executeCypherNormal(ctx, q)
 		if err != nil {
 			return nil, err
 		}
 		return newSliceIterator(result.Columns, result.Rows), nil
-
 	default:
 		return nil, fmt.Errorf("cypher stream: unsupported pattern with %d nodes and %d relationships",
 			len(pat.Nodes), len(pat.Rels))
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Node-match streaming iterator
-// ---------------------------------------------------------------------------
-
-// buildNodeMatchIterator creates a lazy iterator for MATCH (n) patterns.
-// If ORDER BY is present, it must materialize and sort first.
 func (db *DB) buildNodeMatchIterator(q *CypherQuery) (RowIterator, error) {
 	nodePat := q.Match.Pattern.Nodes[0]
 	varName := nodePat.Variable
 	if varName == "" {
 		varName = "_n"
 	}
-
 	columns := make([]string, len(q.Return.Items))
 	for i, item := range q.Return.Items {
 		columns[i] = returnItemName(item)
 	}
-
-	// If ORDER BY is present, we must materialize to sort.
 	if len(q.OrderBy) > 0 {
-		result, err := db.executeCypherNormal(context.Background(), q) // no ctx needed — already materialized
+		result, err := db.executeCypherNormal(context.Background(), q)
 		if err != nil {
 			return nil, err
 		}
 		return newSliceIterator(result.Columns, result.Rows), nil
 	}
-
-	// Streaming path: build a scanIterator that lazily reads nodes.
 	return db.newNodeScanIterator(q, nodePat, varName, columns)
 }
 
-// nodeScanIterator lazily scans nodes from bbolt, applying filters and
-// projecting RETURN expressions one row at a time.
 type nodeScanIterator struct {
 	db      *DB
 	q       *CypherQuery
@@ -201,11 +138,10 @@ type nodeScanIterator struct {
 	err     error
 	closed  bool
 
-	// bbolt transaction management — we hold a read tx per shard.
 	shardIdx int
-	txs      []*bolt.Tx
-	cursor   *bolt.Cursor
-	curTx    *bolt.Tx
+	txs      []*wasm.MemTx
+	cursor   *wasm.MemCursor
+	curTx    *wasm.MemTx
 }
 
 func (db *DB) newNodeScanIterator(q *CypherQuery, nodePat NodePattern, varName string, columns []string) (*nodeScanIterator, error) {
@@ -216,18 +152,14 @@ func (db *DB) newNodeScanIterator(q *CypherQuery, nodePat NodePattern, varName s
 		varName: varName,
 		columns: columns,
 		limit:   q.Limit,
-		txs:     make([]*bolt.Tx, len(db.shards)),
+		txs:     make([]*wasm.MemTx, len(db.shards)),
 	}
 
-	// Try to use index-backed candidates first.
-	// If we have candidates, use a sliceIterator instead of scanning.
 	candidates, err := db.resolveNodeCandidates(q, nodePat, varName)
 	if err != nil {
 		return nil, err
 	}
 	if candidates != nil {
-		// We got pre-resolved candidates — project and return a slice iterator.
-		// But first filter by WHERE and apply LIMIT.
 		var rows []map[string]any
 		for _, n := range candidates {
 			if q.Where != nil {
@@ -255,15 +187,12 @@ func (db *DB) newNodeScanIterator(q *CypherQuery, nodePat NodePattern, varName s
 				break
 			}
 		}
-		// Return a slice iterator — no bbolt txs to hold open.
 		return nil, errUseFallback
 	}
 
-	// Open read transactions for scanning.
 	for i, s := range db.shards {
 		tx, txErr := s.db.Begin(false)
 		if txErr != nil {
-			// Clean up already-opened txs.
 			for j := 0; j < i; j++ {
 				it.txs[j].Rollback()
 			}
@@ -272,15 +201,11 @@ func (db *DB) newNodeScanIterator(q *CypherQuery, nodePat NodePattern, varName s
 		it.txs[i] = tx
 	}
 
-	// Position cursor on first shard.
 	it.shardIdx = 0
 	it.advanceShard()
-
 	return it, nil
 }
 
-// errUseFallback is a sentinel to signal that the scan iterator should not
-// be used; the caller should use a pre-built slice iterator instead.
 var errUseFallback = fmt.Errorf("use fallback")
 
 func (it *nodeScanIterator) advanceShard() {
@@ -302,18 +227,14 @@ func (it *nodeScanIterator) Next() bool {
 	if it.limit > 0 && it.emitted >= it.limit {
 		return false
 	}
-
 	for it.cursor != nil {
 		var k, v []byte
 		if it.row == nil && it.emitted == 0 {
-			// First call — seek to beginning.
 			k, v = it.cursor.First()
 		} else {
 			k, v = it.cursor.Next()
 		}
-
 		for k == nil {
-			// Move to next shard.
 			it.shardIdx++
 			if it.shardIdx >= len(it.txs) {
 				it.cursor = nil
@@ -325,28 +246,19 @@ func (it *nodeScanIterator) Next() bool {
 			}
 			k, v = it.cursor.First()
 		}
-
-		// Decode and filter.
 		nodeID := decodeNodeID(k)
 		props, decErr := decodeProps(v)
 		if decErr != nil {
-			continue // skip corrupted
+			continue
 		}
-
 		labels := loadLabels(it.curTx, nodeID)
 		n := &Node{ID: nodeID, Labels: labels, Props: props}
-
-		// Label filter.
 		if len(it.nodePat.Labels) > 0 && !matchLabels(n.Labels, it.nodePat.Labels) {
 			continue
 		}
-
-		// Inline property filter.
 		if !matchProps(n.Props, it.nodePat.Props) {
 			continue
 		}
-
-		// WHERE clause filter.
 		if it.q.Where != nil {
 			bindings := map[string]any{it.varName: n}
 			ok, evalErr := evalBool(it.q.Where, bindings)
@@ -358,8 +270,6 @@ func (it *nodeScanIterator) Next() bool {
 				continue
 			}
 		}
-
-		// Project RETURN.
 		row := make(map[string]any, len(it.q.Return.Items))
 		bindings := map[string]any{it.varName: n}
 		for _, item := range it.q.Return.Items {
@@ -371,12 +281,10 @@ func (it *nodeScanIterator) Next() bool {
 			}
 			row[colName] = val
 		}
-
 		it.row = row
 		it.emitted++
 		return true
 	}
-
 	return false
 }
 
@@ -396,13 +304,7 @@ func (it *nodeScanIterator) Close() {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// resolveNodeCandidates tries to use an index to pre-resolve candidates.
-// Returns (nil, nil) if no index is available (caller should full-scan).
-// ---------------------------------------------------------------------------
-
 func (db *DB) resolveNodeCandidates(q *CypherQuery, nodePat NodePattern, varName string) ([]*Node, error) {
-	// Label index.
 	if len(nodePat.Labels) > 0 {
 		candidates, err := db.FindByLabel(nodePat.Labels[0])
 		if err != nil {
@@ -420,8 +322,6 @@ func (db *DB) resolveNodeCandidates(q *CypherQuery, nodePat NodePattern, varName
 		}
 		return filtered, nil
 	}
-
-	// Composite index.
 	if len(nodePat.Props) >= 2 {
 		propNames := make([]string, 0, len(nodePat.Props))
 		for k := range nodePat.Props {
@@ -435,8 +335,6 @@ func (db *DB) resolveNodeCandidates(q *CypherQuery, nodePat NodePattern, varName
 			return db.FindByCompositeIndex(filters)
 		}
 	}
-
-	// Single-property index.
 	if len(nodePat.Props) > 0 {
 		for key, val := range nodePat.Props {
 			if db.HasIndex(key) {
@@ -444,7 +342,6 @@ func (db *DB) resolveNodeCandidates(q *CypherQuery, nodePat NodePattern, varName
 				if err != nil {
 					return nil, err
 				}
-				// Filter remaining props.
 				var filtered []*Node
 				for _, n := range candidates {
 					if matchProps(n.Props, nodePat.Props) {
@@ -455,8 +352,6 @@ func (db *DB) resolveNodeCandidates(q *CypherQuery, nodePat NodePattern, varName
 			}
 		}
 	}
-
-	// WHERE equality index.
 	if q.Where != nil && len(nodePat.Props) == 0 {
 		if prop, val, ok := extractWhereEquality(q.Where, varName); ok {
 			if db.HasIndex(prop) {
@@ -464,14 +359,8 @@ func (db *DB) resolveNodeCandidates(q *CypherQuery, nodePat NodePattern, varName
 			}
 		}
 	}
-
-	return nil, nil // no index available — full scan
+	return nil, nil
 }
-
-// ---------------------------------------------------------------------------
-// sliceIterator — wraps a materialized []map[string]any as a RowIterator.
-// Used as fallback for sorted results, OPTIONAL MATCH, EXPLAIN, etc.
-// ---------------------------------------------------------------------------
 
 type sliceIterator struct {
 	columns []string
@@ -497,12 +386,7 @@ func (it *sliceIterator) Row() map[string]any {
 
 func (it *sliceIterator) Columns() []string { return it.columns }
 func (it *sliceIterator) Err() error        { return nil }
-func (it *sliceIterator) Close()            {} // no-op for materialized data
-
-// ---------------------------------------------------------------------------
-// sortedIterator — wraps an iterator that needs sorting.
-// Must materialize all rows, sort, then iterate.
-// ---------------------------------------------------------------------------
+func (it *sliceIterator) Close()            {}
 
 type sortedIterator struct {
 	inner *sliceIterator
@@ -535,28 +419,17 @@ func (it *sortedIterator) Columns() []string   { return it.inner.Columns() }
 func (it *sortedIterator) Err() error          { return it.inner.Err() }
 func (it *sortedIterator) Close()              { it.inner.Close() }
 
-// ---------------------------------------------------------------------------
-// collectIterator — materializes a RowIterator into a CypherResult.
-// Used internally by Cypher() to maintain backward compatibility.
-// ---------------------------------------------------------------------------
-
 func collectIterator(iter RowIterator) (*CypherResult, error) {
 	defer iter.Close()
-
-	result := &CypherResult{
-		Columns: iter.Columns(),
-	}
-
+	result := &CypherResult{Columns: iter.Columns()}
 	for iter.Next() {
 		result.Rows = append(result.Rows, iter.Row())
 	}
 	if err := iter.Err(); err != nil {
 		return nil, err
 	}
-
 	if result.Rows == nil {
 		result.Rows = []map[string]any{}
 	}
-
 	return result, nil
 }

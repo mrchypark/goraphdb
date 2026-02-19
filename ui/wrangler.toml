@@ -1,0 +1,11 @@
+name = "goraphdb-demo"
+compatibility_date = "2024-12-01"
+main = "worker/index.ts"
+
+[assets]
+directory = "dist"
+binding = "ASSETS"
+
+# SPA fallback — serve index.html for any path that doesn't match a static file.
+# This is required for /demo/* client-side routing to work.
+not_found_handling = "single-page-application"

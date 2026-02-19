@@ -1,4 +1,4 @@
-//go:build !js
+//go:build js
 
 package graphdb
 
@@ -6,12 +6,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/mstrYoda/goraphdb/wasm"
 	"github.com/vmihailenco/msgpack/v5"
-	bolt "go.etcd.io/bbolt"
 )
 
-// AddNodeWithLabels creates a new node with labels and properties.
-// Labels are stored separately from properties for efficient label-based lookups.
 func (db *DB) AddNodeWithLabels(labels []string, props Props) (NodeID, error) {
 	if db.isClosed() {
 		return 0, fmt.Errorf("graphdb: database is closed")
@@ -37,24 +35,20 @@ func (db *DB) AddNodeWithLabels(labels []string, props Props) (NodeID, error) {
 		}
 	}
 
-	err = target.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
-		// Enforce unique constraints within the same transaction (serialized by bbolt).
+	err = target.writeUpdate(context.Background(), func(tx *wasm.MemTx) error {
 		if err := db.checkUniqueConstraintsInTx(tx, labels, props, 0); err != nil {
 			return err
 		}
-
 		if err := tx.Bucket(bucketNodes).Put(encodeNodeID(id), data); err != nil {
 			return err
 		}
 		if err := db.indexNodeProps(tx, id, props); err != nil {
 			return err
 		}
-		// Store labels.
 		if len(labelData) > 0 {
 			if err := tx.Bucket(bucketNodeLabels).Put(encodeNodeID(id), labelData); err != nil {
 				return err
 			}
-			// Maintain label index.
 			idxBucket := tx.Bucket(bucketIdxNodeLabel)
 			for _, label := range labels {
 				if err := idxBucket.Put(encodeLabelIndexKey(label, id), nil); err != nil {
@@ -62,7 +56,6 @@ func (db *DB) AddNodeWithLabels(labels []string, props Props) (NodeID, error) {
 				}
 			}
 		}
-		// Update unique constraint index.
 		if err := db.indexUniqueConstraints(tx, id, labels, props); err != nil {
 			return err
 		}
@@ -80,7 +73,6 @@ func (db *DB) AddNodeWithLabels(labels []string, props Props) (NodeID, error) {
 	return id, nil
 }
 
-// AddLabel adds one or more labels to an existing node.
 func (db *DB) AddLabel(id NodeID, labels ...string) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
@@ -93,17 +85,12 @@ func (db *DB) AddLabel(id NodeID, labels ...string) error {
 	}
 
 	s := db.shardFor(id)
-	err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
-		// Verify node exists and load its properties.
+	err := s.writeUpdate(context.Background(), func(tx *wasm.MemTx) error {
 		nodeData := tx.Bucket(bucketNodes).Get(encodeNodeID(id))
 		if nodeData == nil {
 			return fmt.Errorf("graphdb: node %d not found", id)
 		}
-
-		// Load existing labels.
 		existing := loadLabels(tx, id)
-
-		// Merge: add only new labels.
 		labelSet := make(map[string]bool, len(existing))
 		for _, l := range existing {
 			labelSet[l] = true
@@ -116,10 +103,8 @@ func (db *DB) AddLabel(id NodeID, labels ...string) error {
 			}
 		}
 		if len(added) == 0 {
-			return nil // nothing new
+			return nil
 		}
-
-		// Enforce unique constraints for the newly added labels.
 		if len(added) > 0 {
 			props, err := decodeProps(nodeData)
 			if err == nil && len(props) > 0 {
@@ -128,8 +113,6 @@ func (db *DB) AddLabel(id NodeID, labels ...string) error {
 				}
 			}
 		}
-
-		// Persist labels.
 		data, err := msgpack.Marshal(existing)
 		if err != nil {
 			return err
@@ -137,16 +120,12 @@ func (db *DB) AddLabel(id NodeID, labels ...string) error {
 		if err := tx.Bucket(bucketNodeLabels).Put(encodeNodeID(id), data); err != nil {
 			return err
 		}
-
-		// Add index entries for new labels.
 		idxBucket := tx.Bucket(bucketIdxNodeLabel)
 		for _, l := range added {
 			if err := idxBucket.Put(encodeLabelIndexKey(l, id), nil); err != nil {
 				return err
 			}
 		}
-
-		// Update unique constraint index for the new labels.
 		if len(added) > 0 {
 			props, _ := decodeProps(nodeData)
 			if len(props) > 0 {
@@ -167,7 +146,6 @@ func (db *DB) AddLabel(id NodeID, labels ...string) error {
 	return err
 }
 
-// RemoveLabel removes one or more labels from an existing node.
 func (db *DB) RemoveLabel(id NodeID, labels ...string) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
@@ -180,25 +158,21 @@ func (db *DB) RemoveLabel(id NodeID, labels ...string) error {
 	}
 
 	s := db.shardFor(id)
-	err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
+	err := s.writeUpdate(context.Background(), func(tx *wasm.MemTx) error {
 		if tx.Bucket(bucketNodes).Get(encodeNodeID(id)) == nil {
 			return fmt.Errorf("graphdb: node %d not found", id)
 		}
-
 		existing := loadLabels(tx, id)
 		removeSet := make(map[string]bool, len(labels))
 		for _, l := range labels {
 			removeSet[l] = true
 		}
-
 		var kept []string
 		for _, l := range existing {
 			if !removeSet[l] {
 				kept = append(kept, l)
 			}
 		}
-
-		// Persist updated labels.
 		if len(kept) == 0 {
 			if err := tx.Bucket(bucketNodeLabels).Delete(encodeNodeID(id)); err != nil {
 				return err
@@ -212,8 +186,6 @@ func (db *DB) RemoveLabel(id NodeID, labels ...string) error {
 				return err
 			}
 		}
-
-		// Remove index entries.
 		idxBucket := tx.Bucket(bucketIdxNodeLabel)
 		for _, l := range labels {
 			if err := idxBucket.Delete(encodeLabelIndexKey(l, id)); err != nil {
@@ -232,15 +204,13 @@ func (db *DB) RemoveLabel(id NodeID, labels ...string) error {
 	return err
 }
 
-// GetLabels returns the labels for a node.
 func (db *DB) GetLabels(id NodeID) ([]string, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
-
 	s := db.shardFor(id)
 	var labels []string
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.db.View(func(tx *wasm.MemTx) error {
 		if tx.Bucket(bucketNodes).Get(encodeNodeID(id)) == nil {
 			return fmt.Errorf("graphdb: node %d not found", id)
 		}
@@ -250,8 +220,6 @@ func (db *DB) GetLabels(id NodeID) ([]string, error) {
 	return labels, err
 }
 
-// FindByLabel returns all nodes that have the given label.
-// Uses the idx_node_label index for O(matches) performance.
 func (db *DB) FindByLabel(label string) ([]*Node, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
@@ -261,7 +229,7 @@ func (db *DB) FindByLabel(label string) ([]*Node, error) {
 	var nodes []*Node
 
 	for _, s := range db.shards {
-		err := s.db.View(func(tx *bolt.Tx) error {
+		err := s.db.View(func(tx *wasm.MemTx) error {
 			idxBucket := tx.Bucket(bucketIdxNodeLabel)
 			nodeBucket := tx.Bucket(bucketNodes)
 			labelBucket := tx.Bucket(bucketNodeLabels)
@@ -273,7 +241,6 @@ func (db *DB) FindByLabel(label string) ([]*Node, error) {
 					continue
 				}
 				nodeID := decodeNodeID(nodeIDBytes)
-
 				data := nodeBucket.Get(encodeNodeID(nodeID))
 				if data == nil {
 					continue
@@ -282,12 +249,10 @@ func (db *DB) FindByLabel(label string) ([]*Node, error) {
 				if err != nil {
 					continue
 				}
-
 				var labels []string
 				if ldata := labelBucket.Get(encodeNodeID(nodeID)); ldata != nil {
 					_ = msgpack.Unmarshal(ldata, &labels)
 				}
-
 				nodes = append(nodes, &Node{ID: nodeID, Labels: labels, Props: props})
 			}
 			return nil
@@ -296,11 +261,9 @@ func (db *DB) FindByLabel(label string) ([]*Node, error) {
 			return nil, err
 		}
 	}
-
 	return nodes, nil
 }
 
-// HasLabel checks if a node has a specific label.
 func (db *DB) HasLabel(id NodeID, label string) (bool, error) {
 	labels, err := db.GetLabels(id)
 	if err != nil {
@@ -314,10 +277,6 @@ func (db *DB) HasLabel(id NodeID, label string) (bool, error) {
 	return false, nil
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
 // encodeLabelIndexKey creates: "Label\x00" + nodeID(8 bytes big-endian)
 func encodeLabelIndexKey(label string, id NodeID) []byte {
 	b := []byte(label)
@@ -328,7 +287,6 @@ func encodeLabelIndexKey(label string, id NodeID) []byte {
 	return key
 }
 
-// encodeLabelIndexPrefix creates: "Label\x00"
 func encodeLabelIndexPrefix(label string) []byte {
 	b := []byte(label)
 	prefix := make([]byte, len(b)+1)
@@ -337,7 +295,6 @@ func encodeLabelIndexPrefix(label string) []byte {
 	return prefix
 }
 
-// encodeUint64Into writes a uint64 big-endian into an existing slice.
 func encodeUint64Into(buf []byte, v uint64) {
 	buf[0] = byte(v >> 56)
 	buf[1] = byte(v >> 48)
@@ -349,21 +306,7 @@ func encodeUint64Into(buf []byte, v uint64) {
 	buf[7] = byte(v)
 }
 
-// hasPrefix is a local helper to avoid importing bytes in this file.
-func hasPrefix(s, prefix []byte) bool {
-	if len(s) < len(prefix) {
-		return false
-	}
-	for i, b := range prefix {
-		if s[i] != b {
-			return false
-		}
-	}
-	return true
-}
-
-// loadLabels reads labels for a node from the node_labels bucket.
-func loadLabels(tx *bolt.Tx, id NodeID) []string {
+func loadLabels(tx *wasm.MemTx, id NodeID) []string {
 	data := tx.Bucket(bucketNodeLabels).Get(encodeNodeID(id))
 	if data == nil {
 		return nil

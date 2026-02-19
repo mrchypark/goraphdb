@@ -1,3 +1,5 @@
+//go:build !js
+
 package graphdb
 
 import (
@@ -222,20 +224,20 @@ func TestWAL_AllOperationTypes(t *testing.T) {
 	defer db.Close()
 
 	// Exercise all write operations.
-	id1, _ := db.AddNode(Props{"name": "A"})                           // OpAddNode
+	id1, _ := db.AddNode(Props{"name": "A"})                               // OpAddNode
 	id2, _ := db.AddNodeWithLabels([]string{"Person"}, Props{"name": "B"}) // OpAddNodeWithLabels
-	db.AddNodeBatch([]Props{{"name": "C"}, {"name": "D"}})             // OpAddNodeBatch
-	db.UpdateNode(id1, Props{"age": 30})                                // OpUpdateNode
-	db.SetNodeProps(id1, Props{"name": "A2", "age": 31})               // OpSetNodeProps
-	db.AddLabel(id1, "Person")                                          // OpAddLabel
-	db.RemoveLabel(id1, "Person")                                       // OpRemoveLabel
-	edgeID, _ := db.AddEdge(id1, id2, "KNOWS", Props{})                // OpAddEdge
-	db.UpdateEdge(edgeID, Props{"weight": 1.0})                        // OpUpdateEdge
-	db.DeleteEdge(edgeID)                                               // OpDeleteEdge
-	db.CreateIndex("name")                                              // OpCreateIndex
-	db.DropIndex("name")                                                // OpDropIndex
-	db.CreateCompositeIndex("name", "age")                              // OpCreateCompositeIndex
-	db.DropCompositeIndex("name", "age")                                // OpDropCompositeIndex
+	db.AddNodeBatch([]Props{{"name": "C"}, {"name": "D"}})                 // OpAddNodeBatch
+	db.UpdateNode(id1, Props{"age": 30})                                   // OpUpdateNode
+	db.SetNodeProps(id1, Props{"name": "A2", "age": 31})                   // OpSetNodeProps
+	db.AddLabel(id1, "Person")                                             // OpAddLabel
+	db.RemoveLabel(id1, "Person")                                          // OpRemoveLabel
+	edgeID, _ := db.AddEdge(id1, id2, "KNOWS", Props{})                    // OpAddEdge
+	db.UpdateEdge(edgeID, Props{"weight": 1.0})                            // OpUpdateEdge
+	db.DeleteEdge(edgeID)                                                  // OpDeleteEdge
+	db.CreateIndex("name")                                                 // OpCreateIndex
+	db.DropIndex("name")                                                   // OpDropIndex
+	db.CreateCompositeIndex("name", "age")                                 // OpCreateCompositeIndex
+	db.DropCompositeIndex("name", "age")                                   // OpDropCompositeIndex
 
 	// Read all entries.
 	reader, err := db.wal.NewReader(1)

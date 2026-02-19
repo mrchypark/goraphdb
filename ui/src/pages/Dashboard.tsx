@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import { CircleDot, GitBranch, HardDrive, Layers, Database, Crown, Users, Server, WifiOff } from 'lucide-react'
 import StatsCard from '../components/StatsCard'
 import { api } from '../api/client'
@@ -47,8 +48,8 @@ export default function Dashboard() {
       {/* Cluster status banner */}
       {cluster && (
         <div className="mb-6">
-          <a
-            href="/cluster"
+          <Link
+            to="/cluster"
             className={`flex items-center gap-3 px-4 py-3 rounded-xl border transition-colors hover:border-blue-500/30 ${
               cluster.mode === 'cluster'
                 ? cluster.role === 'leader'
@@ -97,7 +98,7 @@ export default function Dashboard() {
                 </span>
               </>
             )}
-          </a>
+          </Link>
         </div>
       )}
 
@@ -141,9 +142,9 @@ export default function Dashboard() {
         {indexes.length === 0 ? (
           <p className="text-slate-600 text-sm">
             No indexes created yet. Go to{' '}
-            <a href="/indexes" className="text-blue-400 hover:underline">
+            <Link to="/indexes" className="text-blue-400 hover:underline">
               Indexes
-            </a>{' '}
+            </Link>{' '}
             to create one.
           </p>
         ) : (
@@ -163,8 +164,8 @@ export default function Dashboard() {
 
       {/* Quick actions */}
       <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
-        <a
-          href="/query"
+        <Link
+          to="/query"
           className="bg-slate-900 border border-slate-800 rounded-xl p-5 hover:border-blue-500/30 transition-colors group"
         >
           <h3 className="text-sm font-semibold text-white group-hover:text-blue-400 transition-colors">
@@ -173,9 +174,9 @@ export default function Dashboard() {
           <p className="text-xs text-slate-500 mt-1">
             Run Cypher queries with live graph visualization
           </p>
-        </a>
-        <a
-          href="/indexes"
+        </Link>
+        <Link
+          to="/indexes"
           className="bg-slate-900 border border-slate-800 rounded-xl p-5 hover:border-blue-500/30 transition-colors group"
         >
           <h3 className="text-sm font-semibold text-white group-hover:text-blue-400 transition-colors">
@@ -184,9 +185,9 @@ export default function Dashboard() {
           <p className="text-xs text-slate-500 mt-1">
             Create, drop, and rebuild property indexes
           </p>
-        </a>
-        <a
-          href="/explorer"
+        </Link>
+        <Link
+          to="/explorer"
           className="bg-slate-900 border border-slate-800 rounded-xl p-5 hover:border-blue-500/30 transition-colors group"
         >
           <h3 className="text-sm font-semibold text-white group-hover:text-blue-400 transition-colors">
@@ -195,7 +196,7 @@ export default function Dashboard() {
           <p className="text-xs text-slate-500 mt-1">
             Browse nodes, inspect properties, explore connections
           </p>
-        </a>
+        </Link>
       </div>
     </div>
   )

@@ -1,4 +1,4 @@
-//go:build !js
+//go:build js
 
 package graphdb
 
@@ -7,13 +7,9 @@ import (
 	"context"
 	"fmt"
 
-	bolt "go.etcd.io/bbolt"
+	"github.com/mstrYoda/goraphdb/wasm"
 )
 
-// CreateIndex creates a secondary index on a node property.
-// This allows fast lookups of nodes by property value.
-// Example: CreateIndex("name") enables fast FindByProperty("name", "Alice").
-// Cypher queries automatically use available indexes for inline property filters.
 func (db *DB) CreateIndex(propName string) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
@@ -23,27 +19,21 @@ func (db *DB) CreateIndex(propName string) error {
 	}
 
 	for _, s := range db.shards {
-		err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
+		err := s.writeUpdate(context.Background(), func(tx *wasm.MemTx) error {
 			idxBucket := tx.Bucket(bucketIdxProp)
 			nodesBucket := tx.Bucket(bucketNodes)
-
-			// Scan all nodes and index the specified property.
 			return nodesBucket.ForEach(func(k, v []byte) error {
 				props, err := decodeProps(v)
 				if err != nil {
-					return nil // skip corrupted entries
+					return nil
 				}
-
 				val, ok := props[propName]
 				if !ok {
 					return nil
 				}
-
-				// Create index key: "propName:value" + nodeID
 				idxKeyStr := fmt.Sprintf("%s:%v", propName, val)
 				nodeID := decodeNodeID(k)
 				idxKey := encodeIndexKey(idxKeyStr, uint64(nodeID))
-
 				return idxBucket.Put(idxKey, nil)
 			})
 		})
@@ -52,14 +42,11 @@ func (db *DB) CreateIndex(propName string) error {
 		}
 	}
 
-	// Register the index in memory for the query optimizer.
 	db.indexedProps.Store(propName, true)
 	db.walAppend(OpCreateIndex, WALCreateIndex{PropName: propName})
 	return nil
 }
 
-// FindByProperty finds nodes where the given property equals the given value.
-// Uses the secondary index if available, otherwise falls back to full scan.
 func (db *DB) FindByProperty(propName string, value interface{}) ([]*Node, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
@@ -76,12 +63,11 @@ func (db *DB) FindByProperty(propName string, value interface{}) ([]*Node, error
 	var nodes []*Node
 
 	for _, s := range db.shards {
-		err := s.db.View(func(tx *bolt.Tx) error {
+		err := s.db.View(func(tx *wasm.MemTx) error {
 			idxBucket := tx.Bucket(bucketIdxProp)
 			nodesBucket := tx.Bucket(bucketNodes)
 
 			if hasIndex {
-				// Fast path: use the secondary index (prefix seek).
 				c := idxBucket.Cursor()
 				for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
 					nodeIDBytes := k[len(prefix):]
@@ -89,7 +75,6 @@ func (db *DB) FindByProperty(propName string, value interface{}) ([]*Node, error
 						continue
 					}
 					nodeID := decodeNodeID(nodeIDBytes)
-
 					data := nodesBucket.Get(encodeNodeID(nodeID))
 					if data == nil {
 						continue
@@ -100,11 +85,9 @@ func (db *DB) FindByProperty(propName string, value interface{}) ([]*Node, error
 					}
 					nodes = append(nodes, &Node{ID: nodeID, Props: props})
 				}
-				// Trust the index: if no entries match, the result is empty.
 				return nil
 			}
 
-			// Slow path: no index — full scan fallback.
 			return nodesBucket.ForEach(func(k, v []byte) error {
 				props, err := decodeProps(v)
 				if err != nil {
@@ -121,11 +104,9 @@ func (db *DB) FindByProperty(propName string, value interface{}) ([]*Node, error
 			return nil, err
 		}
 	}
-
 	return nodes, nil
 }
 
-// DropIndex removes a secondary index on a property.
 func (db *DB) DropIndex(propName string) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
@@ -137,17 +118,15 @@ func (db *DB) DropIndex(propName string) error {
 	prefix := []byte(propName + ":")
 
 	for _, s := range db.shards {
-		err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
+		err := s.writeUpdate(context.Background(), func(tx *wasm.MemTx) error {
 			idxBucket := tx.Bucket(bucketIdxProp)
 			c := idxBucket.Cursor()
-
 			var toDelete [][]byte
 			for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
 				keyCopy := make([]byte, len(k))
 				copy(keyCopy, k)
 				toDelete = append(toDelete, keyCopy)
 			}
-
 			for _, k := range toDelete {
 				if err := idxBucket.Delete(k); err != nil {
 					return err
@@ -160,13 +139,11 @@ func (db *DB) DropIndex(propName string) error {
 		}
 	}
 
-	// Remove from in-memory tracking.
 	db.indexedProps.Delete(propName)
 	db.walAppend(OpDropIndex, WALDropIndex{PropName: propName})
 	return nil
 }
 
-// ListIndexes returns the names of all properties that currently have a secondary index.
 func (db *DB) ListIndexes() []string {
 	var names []string
 	db.indexedProps.Range(func(key, _ any) bool {
@@ -174,13 +151,11 @@ func (db *DB) ListIndexes() []string {
 		return true
 	})
 	if names == nil {
-		names = []string{} // never return nil
+		names = []string{}
 	}
 	return names
 }
 
-// ReIndex rebuilds the property index from scratch.
-// Useful after bulk inserts where index maintenance was skipped.
 func (db *DB) ReIndex(propName string) error {
 	if err := db.DropIndex(propName); err != nil {
 		return err
@@ -188,25 +163,17 @@ func (db *DB) ReIndex(propName string) error {
 	return db.CreateIndex(propName)
 }
 
-// ---------------------------------------------------------------------------
-// Index maintenance helpers — called inside bbolt write transactions by
-// AddNode, UpdateNode, SetNodeProps, DeleteNode to keep indexes up-to-date.
-// ---------------------------------------------------------------------------
-
-// indexNodeProps adds index entries for all indexed properties of a node.
-// Must be called within a bbolt Update transaction on the correct shard.
-func (db *DB) indexNodeProps(tx *bolt.Tx, nodeID NodeID, props Props) error {
+func (db *DB) indexNodeProps(tx *wasm.MemTx, nodeID NodeID, props Props) error {
 	if len(props) == 0 {
 		return nil
 	}
 	idxBucket := tx.Bucket(bucketIdxProp)
-
 	var firstErr error
 	db.indexedProps.Range(func(key, _ any) bool {
 		propName := key.(string)
 		val, ok := props[propName]
 		if !ok {
-			return true // property not present in this node
+			return true
 		}
 		idxKeyStr := fmt.Sprintf("%s:%v", propName, val)
 		idxKey := encodeIndexKey(idxKeyStr, uint64(nodeID))
@@ -219,19 +186,14 @@ func (db *DB) indexNodeProps(tx *bolt.Tx, nodeID NodeID, props Props) error {
 	if firstErr != nil {
 		return firstErr
 	}
-
-	// Maintain composite indexes.
 	return db.indexNodeComposite(tx, nodeID, props)
 }
 
-// unindexNodeProps removes index entries for all indexed properties of a node.
-// Must be called within a bbolt Update transaction on the correct shard.
-func (db *DB) unindexNodeProps(tx *bolt.Tx, nodeID NodeID, props Props) error {
+func (db *DB) unindexNodeProps(tx *wasm.MemTx, nodeID NodeID, props Props) error {
 	if len(props) == 0 {
 		return nil
 	}
 	idxBucket := tx.Bucket(bucketIdxProp)
-
 	var firstErr error
 	db.indexedProps.Range(func(key, _ any) bool {
 		propName := key.(string)
@@ -250,7 +212,5 @@ func (db *DB) unindexNodeProps(tx *bolt.Tx, nodeID NodeID, props Props) error {
 	if firstErr != nil {
 		return firstErr
 	}
-
-	// Maintain composite indexes.
 	return db.unindexNodeComposite(tx, nodeID, props)
 }
