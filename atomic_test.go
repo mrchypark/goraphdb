@@ -116,6 +116,28 @@ func TestUpdateAtomicParameterizedMergeAndSet(t *testing.T) {
 	}
 }
 
+func TestUpdateAtomicCreatePreservesRelationshipProperties(t *testing.T) {
+	db := openAtomicTestDB(t)
+	err := db.UpdateAtomic(context.Background(), func(tx *AtomicTx) error {
+		_, err := tx.CypherWithParams(context.Background(),
+			`CREATE (:Person {name: $from})-[:KNOWS {since: $since}]->(:Person {name: $to})`,
+			map[string]any{"from": "Ada", "to": "Grace", "since": int64(2026)})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.CypherReadWithParams(context.Background(),
+		`MATCH (:Person {name: $from})-[r:KNOWS]->(:Person {name: $to}) RETURN r.since`,
+		map[string]any{"from": "Ada", "to": "Grace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 1 || result.Rows[0]["r.since"] != int64(2026) {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
 func TestUpdateAtomicRejectsMultipleShards(t *testing.T) {
 	opts := DefaultOptions()
 	opts.ShardCount = 2

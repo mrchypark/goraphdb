@@ -87,7 +87,8 @@ type NodePattern struct {
 //	-[:FOLLOWS]-        → Dir=Both
 type RelPattern struct {
 	Variable  string
-	Label     string    // empty = match any edge label
+	Label     string // empty = match any edge label
+	Props     map[string]any
 	Dir       Direction // Outgoing, Incoming, Both
 	VarLength bool      // true when * is present
 	MinHops   int       // default 1

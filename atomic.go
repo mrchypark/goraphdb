@@ -173,6 +173,11 @@ func resolveCreateParams(write *CypherWrite, params map[string]any) error {
 				return err
 			}
 		}
+		for j := range write.Creates[i].Rels {
+			if err := resolvePropertyParams(write.Creates[i].Rels[j].Props, params); err != nil {
+				return err
+			}
+		}
 	}
 	return resolveReturnParams(write.Return, params)
 }
@@ -224,7 +229,7 @@ func (t *AtomicTx) executeCreate(ctx context.Context, write *CypherWrite) (*Cyph
 			if relation.Label == "" {
 				return nil, fmt.Errorf("cypher exec: CREATE relationship requires a label (type)")
 			}
-			edge, err := t.addEdge(from, to, relation.Label, nil)
+			edge, err := t.addEdge(from, to, relation.Label, relation.Props)
 			if err != nil {
 				return nil, fmt.Errorf("cypher exec: CREATE edge failed: %w", err)
 			}

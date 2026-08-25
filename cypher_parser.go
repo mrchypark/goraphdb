@@ -456,6 +456,15 @@ func (p *parser) parseRelPattern() (RelPattern, error) {
 		}
 	}
 
+	if p.is(tokLBrace) {
+		p.advance()
+		props, err := p.parsePropMap()
+		if err != nil {
+			return rp, err
+		}
+		rp.Props = props
+	}
+
 	if _, err := p.expect(tokRBracket); err != nil {
 		return rp, err
 	}
