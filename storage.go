@@ -34,6 +34,7 @@ var (
 	bucketIdxComposite = []byte("idx_composite")  // composite property index
 	bucketIdxUnique    = []byte("idx_unique")     // unique constraint value index
 	bucketUniqueMeta   = []byte("unique_meta")    // unique constraint metadata
+	bucketAppMeta      = []byte("app_meta")       // application-owned metadata
 
 	// Meta keys
 	metaNextNodeID = []byte("next_node_id")
@@ -57,6 +58,7 @@ var allBuckets = [][]byte{
 	bucketIdxComposite,
 	bucketIdxUnique,
 	bucketUniqueMeta,
+	bucketAppMeta,
 }
 
 // shardSyncInterval is how often the background goroutine calls db.Sync()
