@@ -19,6 +19,40 @@ type AtomicTx struct {
 	bloomAdds   [][2]NodeID
 }
 
+// GetMetadata returns a copy of application metadata without opening a write transaction.
+func (db *DB) GetMetadata(key []byte) ([]byte, error) {
+	if db.isClosed() {
+		return nil, fmt.Errorf("graphdb: database is closed")
+	}
+	if len(db.shards) != 1 {
+		return nil, fmt.Errorf("graphdb: application metadata requires ShardCount=1")
+	}
+	var value []byte
+	err := db.shards[0].db.View(func(tx *bolt.Tx) error {
+		value = bytes.Clone(tx.Bucket(bucketAppMeta).Get(key))
+		return nil
+	})
+	return value, err
+}
+
+// CypherReadWithParams executes a parameterized read and rejects every mutation.
+func (db *DB) CypherReadWithParams(ctx context.Context, query string, params map[string]any) (*CypherResult, error) {
+	if db.isClosed() {
+		return nil, fmt.Errorf("graphdb: database is closed")
+	}
+	parsed, err := parseCypher(query)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.read == nil || parsed.write != nil || parsed.merge != nil || len(parsed.read.Set) > 0 || len(parsed.read.Delete) > 0 {
+		return nil, fmt.Errorf("graphdb: Cypher read API rejects mutations")
+	}
+	if err := resolveParams(parsed.read, params); err != nil {
+		return nil, err
+	}
+	return db.executeCypherRead(ctx, query, parsed.read)
+}
+
 // UpdateAtomic executes fn in one durable bbolt transaction. Multi-shard
 // databases are rejected because bbolt cannot atomically commit across files.
 func (db *DB) UpdateAtomic(ctx context.Context, fn func(*AtomicTx) error) error {

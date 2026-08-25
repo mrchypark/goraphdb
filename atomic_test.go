@@ -129,3 +129,14 @@ func TestUpdateAtomicRejectsMultipleShards(t *testing.T) {
 		t.Fatal("expected multi-shard atomic update rejection")
 	}
 }
+
+func TestCypherReadWithParamsRejectsMutation(t *testing.T) {
+	db := openAtomicTestDB(t)
+	if _, err := db.CypherReadWithParams(context.Background(),
+		`CREATE (n:Person {name: $name})`, map[string]any{"name": "Alice"}); err == nil {
+		t.Fatal("read API accepted CREATE")
+	}
+	if db.NodeCount() != 0 {
+		t.Fatalf("node count=%d after rejected mutation", db.NodeCount())
+	}
+}
