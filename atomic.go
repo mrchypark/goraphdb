@@ -46,16 +46,18 @@ func (db *DB) UpdateAtomic(ctx context.Context, fn func(*AtomicTx) error) error 
 		_ = btx.Rollback()
 		return err
 	}
-	if err := atx.persistCounters(); err != nil {
+	counters, err := atx.persistCounters()
+	if err != nil {
 		_ = btx.Rollback()
 		return err
 	}
 	if err := btx.Commit(); err != nil {
 		return fmt.Errorf("graphdb: commit atomic update: %w", err)
 	}
-	if err := s.loadCounters(); err != nil {
-		return fmt.Errorf("graphdb: reload counters after atomic update: %w", err)
-	}
+	s.nextNodeID.Store(counters.nextNodeID)
+	s.nextEdgeID.Store(counters.nextEdgeID)
+	s.nodeCount.Store(counters.nodeCount)
+	s.edgeCount.Store(counters.edgeCount)
 	for id := range atx.invalidated {
 		db.ncache.Invalidate(id)
 	}
@@ -327,14 +329,30 @@ func projectAtomicReturn(ret *ReturnClause, bindings map[string]any) *CypherResu
 	return result
 }
 
-func (t *AtomicTx) persistCounters() error {
+type atomicCounters struct {
+	nextNodeID uint64
+	nextEdgeID uint64
+	nodeCount  uint64
+	edgeCount  uint64
+}
+
+func (t *AtomicTx) persistCounters() (atomicCounters, error) {
 	meta := t.tx.Bucket(bucketMeta)
 	nodes := t.tx.Bucket(bucketNodes)
 	edges := t.tx.Bucket(bucketEdges)
-	if err := meta.Put(metaNodeCount, encodeUint64(uint64(nodes.Stats().KeyN))); err != nil {
-		return err
+	counters := atomicCounters{
+		nextNodeID: decodeUint64(meta.Get(metaNextNodeID)),
+		nextEdgeID: decodeUint64(meta.Get(metaNextEdgeID)),
+		nodeCount:  uint64(nodes.Stats().KeyN),
+		edgeCount:  uint64(edges.Stats().KeyN),
 	}
-	return meta.Put(metaEdgeCount, encodeUint64(uint64(edges.Stats().KeyN)))
+	if err := meta.Put(metaNodeCount, encodeUint64(counters.nodeCount)); err != nil {
+		return atomicCounters{}, err
+	}
+	if err := meta.Put(metaEdgeCount, encodeUint64(counters.edgeCount)); err != nil {
+		return atomicCounters{}, err
+	}
+	return counters, nil
 }
 
 // GetMetadata returns a copy of application metadata, or nil when absent.
