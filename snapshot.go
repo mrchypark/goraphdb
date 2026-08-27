@@ -3,10 +3,68 @@ package graphdb
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 
 	bolt "go.etcd.io/bbolt"
 )
+
+// FileSnapshot pins a single-shard database file at one read transaction.
+// It is intended for online backups; Close must be called after WriteTo.
+type FileSnapshot struct {
+	tx   *bolt.Tx
+	once sync.Once
+}
+
+// BeginFileSnapshot starts an online, point-in-time file snapshot.
+func (db *DB) BeginFileSnapshot() (*FileSnapshot, error) {
+	if db.isClosed() {
+		return nil, fmt.Errorf("graphdb: database is closed")
+	}
+	if len(db.shards) != 1 {
+		return nil, fmt.Errorf("graphdb: file snapshots require one shard")
+	}
+	tx, err := db.shards[0].db.Begin(false)
+	if err != nil {
+		return nil, fmt.Errorf("graphdb: begin file snapshot: %w", err)
+	}
+	return &FileSnapshot{tx: tx}, nil
+}
+
+// WriteTo writes the transaction-consistent bbolt image.
+func (s *FileSnapshot) WriteTo(ctx context.Context, dst io.Writer) (int64, error) {
+	if s == nil || s.tx == nil {
+		return 0, fmt.Errorf("graphdb: file snapshot is closed")
+	}
+	return s.tx.WriteTo(contextWriter{ctx: ctx, dst: dst})
+}
+
+// Close releases pinned pages. It is safe to call more than once.
+func (s *FileSnapshot) Close() error {
+	if s == nil {
+		return nil
+	}
+	var err error
+	s.once.Do(func() {
+		if s.tx != nil {
+			err = s.tx.Rollback()
+			s.tx = nil
+		}
+	})
+	return err
+}
+
+type contextWriter struct {
+	ctx context.Context
+	dst io.Writer
+}
+
+func (w contextWriter) Write(p []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return w.dst.Write(p)
+}
 
 // ---------------------------------------------------------------------------
 // Snapshot Reads — consistent, point-in-time read views.

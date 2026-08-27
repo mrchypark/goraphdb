@@ -408,6 +408,14 @@ func (t *AtomicTx) PutMetadata(key, value []byte) error {
 	return t.tx.Bucket(bucketAppMeta).Put(key, value)
 }
 
+// DeleteMetadata removes application metadata in the same transaction as graph changes.
+func (t *AtomicTx) DeleteMetadata(key []byte) error {
+	if len(key) == 0 {
+		return fmt.Errorf("graphdb: metadata key is empty")
+	}
+	return t.tx.Bucket(bucketAppMeta).Delete(key)
+}
+
 func (t *AtomicTx) nextID(metaKey, dataBucket []byte) (uint64, error) {
 	meta := t.tx.Bucket(bucketMeta)
 	last := decodeUint64(meta.Get(metaKey))
